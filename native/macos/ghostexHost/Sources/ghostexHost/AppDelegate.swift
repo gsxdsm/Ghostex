@@ -4422,6 +4422,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, SPUU
 
   private func runProcess(_ command: RunProcess, sendEvent: @escaping (HostEvent) -> Void) {
     Task.detached {
+      // Stat absolute executables before spawning so a missing interpreter (for
+      // example the bundled Web/code-server/lib/node runtime) surfaces a clear
+      // path in the toast instead of the bare Cocoa `The file "node" doesn't
+      // exist.` error, which hides which path failed.
+      if command.executable.hasPrefix("/"),
+        !FileManager.default.fileExists(atPath: command.executable)
+      {
+        await MainActor.run {
+          sendEvent(
+            .processResult(
+              requestId: command.requestId,
+              exitCode: 127,
+              stdout: "",
+              stderr: "Executable not found at \(command.executable)"
+            ))
+        }
+        return
+      }
       let process = Process()
       process.executableURL = URL(fileURLWithPath: command.executable)
       process.arguments = command.args
@@ -10788,6 +10806,24 @@ final class ghostexRootView: NSView {
    */
   private func runProcess(_ command: RunProcess) {
     Task.detached { [weak self] in
+      // Stat absolute executables before spawning so a missing interpreter (for
+      // example the bundled Web/code-server/lib/node runtime) surfaces a clear
+      // path in the toast instead of the bare Cocoa `The file "node" doesn't
+      // exist.` error, which hides which path failed.
+      if command.executable.hasPrefix("/"),
+        !FileManager.default.fileExists(atPath: command.executable)
+      {
+        let result = HostEvent.processResult(
+          requestId: command.requestId,
+          exitCode: 127,
+          stdout: "",
+          stderr: "Executable not found at \(command.executable)"
+        )
+        await MainActor.run { [weak self] in
+          self?.postHostEvent(result)
+        }
+        return
+      }
       let process = Process()
       process.executableURL = URL(fileURLWithPath: command.executable)
       process.arguments = command.args

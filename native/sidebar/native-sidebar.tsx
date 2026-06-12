@@ -5743,7 +5743,7 @@ const commonDirs = uniquePaths(["/opt/homebrew/bin", "/usr/local/bin", userBin])
 function isGhostexOwnedPath(command, filePath) {
   const real = realpathOrSelf(filePath);
   const targetReal = realpathOrSelf(targets[command]);
-  if (real === targetReal) {
+  if (real === targetReal || real.toLowerCase() === targetReal.toLowerCase()) {
     return true;
   }
   const normalized = real.toLowerCase();
