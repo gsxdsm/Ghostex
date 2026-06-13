@@ -38,11 +38,11 @@ The hard constraint: **gxserver is a pure Node.js daemon and cannot render an `N
 
 - **R1.** A standalone macOS menu bar agent (`GxserverBar.app`, LSUIElement) presents an `NSStatusItem` and a dropdown menu.
 - **R2.** The menu exposes server control: **Start**, **Stop**, **Restart**, **Open Logs**, **Quit agent** — with items enabled/disabled based on current daemon state.
-- **R3.** The status item reflects live daemon run state (running / stopped / unreachable) and the session-status indicator counts (attention / working / available).
+- **R3.** The status item reflects live daemon run state (running / stopped / unreachable) and the session-status indicator counts. Display rule (preserve current behavior, `SessionStatusIndicatorController.swift:124`): show `available` **only** when both `attention` and `working` are zero (all-idle); otherwise show only the non-zero attention/working badges.
 - **R4.** Indicator counts are derived from **gxserver presentation state** (the single source of truth), not from the React sidebar.
 - **R5.** The agent reads the daemon health/control/event APIs over `127.0.0.1:58744` using the existing bearer token at `~/.ghostex/gxserver/auth/token`.
-- **R6.** The agent **persists across daemon stop/restart** so it can Start the daemon when down. gxserver bootstraps the agent on startup if it isn't already running.
-- **R7.** Clicking the status item (or a session badge) focuses / launches the main `Ghostex.app` via the existing `ghostex://` URL scheme.
+- **R6.** The agent **persists across daemon stop/restart** so it can Start the daemon when down. gxserver bootstraps the agent on startup if it isn't already running (daemon-driven; no login item — see KTD4).
+- **R7.** The menu's first item, **"Open Ghostex"**, focuses / launches the main `Ghostex.app` via the existing `ghostex://` URL scheme. Interaction is **menu-first** (KTD7): there is no bare-icon or badge sub-region click. Per-session focus, if included, is a menu item below "Open Ghostex".
 - **R8.** `SessionStatusIndicatorController` and its menu bar wiring are removed from `Ghostex.app`. Floating / in-window indicators (if separate) are preserved.
 - **R9.** The agent is built and bundled with gxserver, gated to macOS; Linux/standalone server packaging is unaffected.
 
@@ -100,7 +100,7 @@ stateDiagram-v2
     end note
 ```
 
-The agent persists in all states. When `Stopped`/`Unreachable`, the agent is the only surviving control surface, which is why Start cannot depend on the daemon being alive.
+Once bootstrapped, the agent persists across daemon stop/restart, so when `Stopped`/`Unreachable` it remains the surviving control surface — which is why Start cannot depend on the daemon being alive. The agent is **not** a login item; after a cold reboot it returns the next time gxserver starts (matching today's behavior, where there is no menu bar until the app/daemon runs).
 
 ---
 
@@ -129,14 +129,13 @@ The per-unit `**Files:**` sections remain authoritative.
 
 - **KTD2 — Indicator counts are aggregated server-side in gxserver.** Rather than porting the sidebar's bucket-mapping into Swift, gxserver derives `{attentionCount, workingCount, availableCount}` from its existing presentation activity (`GxserverPresentationSessionActivity = "attention" | "idle" | "working"`, `gxserver/protocol/index.ts:975`) and exposes it via a GET endpoint + a field on the event-stream broadcast. This makes gxserver the single source of truth (R4) and avoids divergence between the sidebar and the agent. Trade-off: a small new aggregation + endpoint vs. duplicating mapping logic in Swift; chosen for single-source-of-truth.
 
-- **KTD3 — Agent persists; Start/Restart shell out to the bundled `gxserver` launcher.** The agent is never killed by daemon stop. To Start the daemon when down, the agent execs the packaged `gxserver` launcher script (which resolves the bundled Node — created by `package-gxserver.mjs`), i.e. `gxserver start`. Stop uses `POST /api/control/stop`; Restart = stop then start. Trade-off vs. a new `/api/control/restart` endpoint: a restart endpoint can't help when the daemon is already down, so exec-based Start is required regardless; Restart reuses it for symmetry.
+- **KTD3 — Agent persists; Start/Restart shell out to a fixed bundle-relative `gxserver` launcher; Restart waits for stop.** The agent is never killed by daemon stop. To Start the daemon when down, the agent execs the packaged `gxserver` launcher script (which resolves the bundled Node — created by `package-gxserver.mjs`), i.e. `gxserver start`. The launcher path is resolved from a **fixed location relative to the agent's own bundle inside `Ghostex.app`** and validated (must exist inside the bundle) before exec — it is **not** read from daemon-written runtime metadata. Stop uses `POST /api/control/stop`. **Restart = Stop, then poll until the daemon is actually unreachable, then Start** — because `/api/control/stop` responds *before* shutdown completes (`gxserver/src/server.ts:902`); an immediate `gxserver start` would see the old daemon still running and exit, after which the old daemon then shuts down. Reuse the existing wait-for-stopped poll (`GxserverClient.swift:464`).
 
-- **KTD4 — gxserver bootstraps the agent on startup, idempotently.** On `runGxserverForeground`/background start, gxserver launches `GxserverBar.app` via `open -g` **only when it can resolve the staged bundle** (see U3); absent bundle is a no-op. Trade-off: relying on `open -g` keeps gxserver from needing to manage the process handle (matching how the main app already treats the daemon as detached).
-  - **OPEN — reboot persistence mechanism is unresolved.** `SMAppService.loginItem` requires the agent bundle to live inside a parent app's `Contents/Library/LoginItems/` — it cannot register an arbitrary gxserver-staged standalone `.app`, and login items can be user-disabled or unregistered on Sparkle app-update. So "returns after reboot" as originally stated does not hold for the chosen bundle layout. Candidate resolutions (decide before U3): (a) a `~/Library/LaunchAgents/` plist owned by the install; (b) accept daemon-driven bootstrap only (agent returns when the daemon next starts, not on cold reboot); (c) relocate the agent bundle to a login-item-eligible location. See Open Questions.
+- **KTD4 — gxserver bootstraps the agent on startup; daemon-driven only, no login item.** On `runGxserverForeground`/background start, gxserver launches `GxserverBar.app` via `open -g` **only when it can resolve the staged bundle** (see U3); absent bundle is a no-op. The agent is **not** registered as a login item: `SMAppService.loginItem` cannot register an arbitrary gxserver-staged standalone `.app` (it requires the bundle inside a parent app's `Contents/Library/LoginItems/`, and login items are user-disableable / lost on Sparkle update). Persistence is therefore **daemon-driven**: the agent survives daemon stop/restart once running, and after a cold reboot returns the next time gxserver starts — matching today's "no menu bar until the app/daemon runs" behavior. Trade-off accepted: no menu bar after reboot until gxserver next launches; this avoids the login-item layout/signing fragility entirely.
 
-- **KTD7 — `NSStatusItem` interaction model (click vs. menu).** A status item cannot natively expose both a bare click action and an attached `NSMenu` — attaching a menu makes macOS intercept every click to open it. Resolution (recommended, confirm before U2): **attach the menu**, make **"Open Ghostex"** its first item (satisfies R7 app-focus), and place session-focus actions as menu items rather than relying on badge sub-region clicks (the badge is a single hit target with no native sub-region routing). This reframes R7 from "click the icon" to "menu item," and folds session-focus into the menu. See Open Questions.
+- **KTD7 — Menu-first interaction; no badge/sub-region click.** A status item cannot natively expose both a bare click action and an attached `NSMenu` — attaching a menu makes macOS intercept every click to open it, and the current sub-region badge click only works *because* there is no menu (`SessionStatusIndicatorController.swift:550`). Resolution: **attach the menu.** Its first item is **"Open Ghostex"** (app focus); session/status-bucket focus actions are **menu items below it**, not clickable badge regions. R7/U5 are written menu-first accordingly.
 
-- **KTD5 — Cross-process focus via `ghostex://`.** Clicking the status item / a session badge opens a `ghostex://` URL handled by `AppDelegate.application(_:open:)` (`AppDelegate.swift:718`), launching/focusing the main app. The exact URL route for "focus session N" may need a new case in the existing handler; the precise path is deferred to implementation.
+- **KTD5 — Cross-process focus via `ghostex://`, from menu items.** Selecting "Open Ghostex" (or a session menu item) opens a `ghostex://` URL handled by `AppDelegate.application(_:open:)` (`AppDelegate.swift:718`), launching/focusing the main app. App-focus is in scope now; a per-session focus route (new `handleOSIntegrationURL` case — today only `terminal`/`open`/`edit` exist) is deferred to follow-up unless its contract is defined during U5.
 
 - **KTD6 — Share rendering by moving, not duplicating.** The badge-image rendering currently in `SessionStatusIndicatorView` (`SessionStatusIndicatorController.swift:380-453`) moves into the agent. Since the main-app indicator is being removed (R8), there is no shared consumer to factor a module for — the code relocates wholesale.
 
@@ -156,10 +155,10 @@ The per-unit `**Files:**` sections remain authoritative.
 - `gxserver/src/session-presentation.ts` (or new `gxserver/src/status-indicators.ts`) — derive `{attentionCount, workingCount, availableCount}` from presentation activity + attention state.
 - `gxserver/src/api.ts` — add `GET /api/ui/statusIndicators` (authenticated, local).
 - `gxserver/src/events.ts` — include the aggregate (or a `statusIndicators` delta) in event-stream broadcasts so counts update live.
-- `gxserver/protocol/index.ts` — add the `GxserverStatusIndicators` type and endpoint constant.
+- `gxserver/protocol/index.ts` — add the `GxserverStatusIndicators` type (counts + the `hideMenuBarSessionStatusIndicators` preference) and endpoint constant.
 - `gxserver/test/status-indicators.test.ts` (new), extend `gxserver/test/session-presentation.test.ts`, `gxserver/test/api.test.ts`, `gxserver/test/events.test.ts`.
 
-**Approach:** Map presentation activity → buckets: `working` → working; sessions with active attention state → attention; `idle` → available. Mirror the bucket semantics the sidebar uses today so counts are unchanged from the user's perspective. Broadcast the aggregate on the existing `/api/events` stream alongside presentation snapshots.
+**Approach:** Map presentation activity → buckets: `working` → working; sessions with active attention state → attention; `idle` → available. Mirror the bucket semantics the sidebar uses today so counts are unchanged from the user's perspective. The aggregate carries raw counts plus the `hideMenuBarSessionStatusIndicators` preference (the agent's only needed pref — badge `size` is *not* needed: the menu-bar indicator is hard-coded small today, `SessionStatusIndicatorController.swift:159`, and `size` applies only to the floating panel). The `available`-suppression display rule (show available only in the all-idle case) is applied by the agent at render time (U2), not by zeroing the count here. Broadcast the aggregate on the existing `/api/events` stream alongside presentation snapshots.
 
 **Patterns to follow:** existing endpoint descriptors and auth gating in `gxserver/src/api.ts:16-90`; event broadcast shape in `gxserver/src/events.ts`.
 
@@ -188,20 +187,23 @@ The per-unit `**Files:**` sections remain authoritative.
 - `native/macos/gxserverBar/Sources/gxserverBar/GxserverBarAppDelegate.swift` — status item creation, menu, health polling + WS subscription wiring.
 - `native/macos/gxserverBar/Sources/gxserverBar/GxserverBarClient.swift` — HTTP health/status/control + WS event subscription + auth-token read.
 - `native/macos/gxserverBar/Sources/gxserverBar/StatusIndicatorRenderer.swift` — badge image rendering moved from `SessionStatusIndicatorView`.
-- `native/macos/gxserverBar/Sources/gxserverBar/ServerControl.swift` — Stop (HTTP), Open Logs, ghostex:// focus (Start/Restart land in U3).
+- `native/macos/gxserverBar/Sources/gxserverBar/ServerControl.swift` — Stop (HTTP), Open Logs, "Open Ghostex" via ghostex:// (Start/Restart land in U3).
 - `native/macos/gxserverBar/Info.plist` — `LSUIElement = true`, bundle id `com.madda.ghostex.bar`.
 - Tests: `native/macos/gxserverBar/Tests/...` for bucket→render mapping and client request construction (auth header, protocol-version header, base URL).
 
-**Approach:** Port the slim, read-only/control parts of `GxserverClient.swift` (base URL `http://127.0.0.1:58744`, protocol version `1`, token read from `~/.ghostex/gxserver/auth/token`, health GET, `POST /api/control/stop`). Subscribe to `/api/events` for live counts; fall back to short-interval polling of `GET /api/ui/statusIndicators` if the socket drops. Render the status item via the moved renderer. Menu items reflect the KTD3 state machine (enable/disable by daemon state). Clicking the icon opens `ghostex://` to focus the main app.
+**Approach:** Port the slim, read-only/control parts of `GxserverClient.swift` (base URL `http://127.0.0.1:58744`, protocol version `1`, token read from `~/.ghostex/gxserver/auth/token`, health GET, `POST /api/control/stop`). Subscribe to `/api/events` for live counts; fall back to short-interval polling of `GET /api/ui/statusIndicators` if the socket drops. Render the status item via the moved renderer, applying the `available`-suppression rule (R3) and honoring `hideMenuBarSessionStatusIndicators`. Interaction is **menu-first** (KTD7): an `NSMenu` is attached, so there is no bare-icon/badge click; the menu's first item is "Open Ghostex". Menu items reflect the state machine (enable/disable by daemon state).
 
 **Patterns to follow:** `GxserverClient.swift:97-200` (client constants, token read, health polling), `SessionStatusIndicatorController.swift:40-75` (status item creation) and `:380-453` (badge rendering).
 
 **Test scenarios:**
-- Happy path: counts `{1,2,3}` render the expected three badges; menu shows Stop/Restart/Open Logs enabled when health OK.
+- Happy path: counts `{attention:1, working:2, available:3}` render **two** badges (attention + working); `available` is suppressed because attention/working are non-zero (R3, `:124`).
+- Display rule: all-idle `{0,0,3}` renders the single `available` badge; `{0,0,0}` renders no count badges.
+- Preference: `hideMenuBarSessionStatusIndicators = true` hides the count badges entirely.
+- Menu: first item is "Open Ghostex"; Stop/Restart/Open Logs enabled when health OK.
 - State: health unreachable → "Stopped" presentation, Start enabled, Stop/Restart disabled.
 - Client: requests carry `Authorization: Bearer <token>` and `x-gxserver-protocol-version: 1`; missing token surfaces a clear error state rather than crashing.
 - Edge: WS disconnect falls back to polling and recovers when the socket returns.
-- Integration: clicking the status item issues the expected `ghostex://` open.
+- Integration: selecting "Open Ghostex" issues the expected `ghostex://` open.
 
 **Verification:** Launching the agent against a running daemon shows correct live counts and a working Stop/Open Logs; against a stopped daemon shows Stopped + Start.
 
@@ -217,12 +219,11 @@ The per-unit `**Files:**` sections remain authoritative.
 
 **Files:**
 - `gxserver/src/lifecycle.ts` — on start (macOS only), `open -g` the bundled `GxserverBar.app` if not already running.
-- `gxserver/src/server.ts` / `gxserver/src/runtime.ts` — record the bundled agent path (and the `gxserver` launcher path) in runtime metadata so the agent and lifecycle can locate them.
-- `gxserver/src/constants.ts` — agent bundle id / relative path constants.
-- `native/macos/gxserverBar/Sources/gxserverBar/ServerControl.swift` — Start/Restart exec the bundled `gxserver` launcher (`gxserver start`); register as login item via `SMAppService`.
+- `gxserver/src/lifecycle.ts` / `gxserver/src/constants.ts` — agent bundle-relative path constant used by gxserver to resolve and `open -g` the staged agent. (No launcher/agent paths are written to runtime metadata — see KTD3 / R-I.)
+- `native/macos/gxserverBar/Sources/gxserverBar/ServerControl.swift` — Start execs the `gxserver` launcher resolved from a **fixed path relative to the agent's own bundle inside `Ghostex.app`**, validated (must exist inside the bundle) before exec. **Restart** = `POST /api/control/stop`, then poll until the daemon is actually unreachable, then exec `gxserver start` (see KTD3; stop is async — `server.ts:902`). No login-item registration.
 - Tests: `gxserver/test/lifecycle.test.ts` (agent-bootstrap is macOS-gated and idempotent — does not relaunch when already running).
 
-**Approach:** gxserver gates the bootstrap on **actually resolving the staged agent bundle relative to its own `cli.js` location** (e.g. `Contents/Resources/.../GxserverBar.app`), not merely on `process.platform === "darwin"`. Standalone/headless macOS installs (Homebrew, server tarball) have no app bundle and therefore no agent — "agent bundle absent" is a normal no-op, matching how packaging is already gated. When the bundle resolves and the agent isn't already running, gxserver launches it detached via `open -g` (background, no focus steal). The daemon never terminates the agent on stop. The agent registers itself as a login item so it returns after reboot. Start/Restart in the agent shell out to the packaged `gxserver` launcher script (resolves bundled Node — see `package-gxserver.mjs:196-209`); Restart = `POST /api/control/stop` then exec `gxserver start`.
+**Approach:** gxserver gates the bootstrap on **actually resolving the staged agent bundle relative to its own `cli.js` location** (e.g. `Contents/Resources/.../GxserverBar.app`), not merely on `process.platform === "darwin"`. Standalone/headless macOS installs (Homebrew, server tarball) have no app bundle and therefore no agent — "agent bundle absent" is a normal no-op, matching how packaging is already gated. When the bundle resolves and the agent isn't already running, gxserver launches it detached via `open -g` (background, no focus steal). The daemon never terminates the agent on stop. The agent is **not** a login item (KTD4) — persistence is daemon-driven, so after a cold reboot the agent returns the next time gxserver starts. Start execs the packaged `gxserver` launcher (resolves bundled Node — see `package-gxserver.mjs:196-209`) from a fixed bundle-relative, pre-validated path; **Restart waits for the daemon to be unreachable between stop and start** (`server.ts:902` returns before shutdown completes; reuse the wait-for-stopped poll at `GxserverClient.swift:464`).
 
 **Execution note:** Start with a failing `lifecycle.test.ts` asserting the macOS-gated, idempotent bootstrap before wiring the `open` call.
 
@@ -232,10 +233,10 @@ The per-unit `**Files:**` sections remain authoritative.
 - Happy path: start on macOS with agent absent → bootstrap invoked once.
 - Idempotency: start with agent already running → no second launch.
 - Platform gate: start on Linux → bootstrap never invoked; no error.
-- Restart: agent Stop then Start results in a fresh healthy daemon.
-- Edge: Start when launcher path missing surfaces a clear agent error, no crash.
+- Restart: Stop is issued, the agent waits until health is unreachable, *then* Start runs — result is a single fresh healthy daemon (no race where Start exits because the old daemon is still up, then the old daemon dies).
+- Edge: Start when the bundle-relative launcher path fails validation surfaces a clear agent error, no exec.
 
-**Verification:** Cold `gxserver start` on macOS brings up the menu bar agent; quitting the daemon from the menu leaves the agent alive showing Stopped with a working Start.
+**Verification:** Cold `gxserver start` on macOS brings up the menu bar agent; quitting the daemon from the menu leaves the agent alive showing Stopped with a working Start; Restart reliably yields exactly one running daemon.
 
 ---
 
@@ -266,27 +267,27 @@ The per-unit `**Files:**` sections remain authoritative.
 
 ---
 
-### U5. Cross-process focus from the agent
+### U5. Cross-process app focus from the agent
 
-**Goal:** Clicking the status item / a session badge focuses or launches the main `Ghostex.app`, and (where applicable) the relevant session.
+**Goal:** The "Open Ghostex" menu item launches / focuses the main `Ghostex.app`.
 
 **Requirements:** R7.
 
 **Dependencies:** U2.
 
 **Files:**
-- `native/macos/gxserverBar/Sources/gxserverBar/ServerControl.swift` — open `ghostex://` URLs.
-- `native/macos/ghostexHost/Sources/ghostexHost/AppDelegate.swift` — add/confirm a `ghostex://` route for focus (and focus-session) in `application(_:open:)` (`:718`).
+- `native/macos/gxserverBar/Sources/gxserverBar/ServerControl.swift` — open a `ghostex://` URL for app focus.
+- `native/macos/ghostexHost/Sources/ghostexHost/AppDelegate.swift` — confirm/extend the `ghostex://` route in `application(_:open:)` (`:718`) to bring the app to front.
 
-**Approach:** The agent opens a `ghostex://` URL to activate the main app; clicking a specific badge passes a session/status hint so the app focuses the right session (replacing the old in-process `sessionStatusIndicatorClicked` → sidebar path at `SessionStatusIndicatorController.swift:583`). The precise URL route is deferred to implementation; reuse the existing scheme registered in `project.yml:99`.
+**Approach:** Selecting "Open Ghostex" opens a `ghostex://` URL (reuse the scheme registered at `project.yml:99`) that activates the main app. **Per-session focus is deferred to follow-up:** the old behavior was an in-process `sessionStatusIndicatorClicked` → sidebar event (`SessionStatusIndicatorController.swift:583`), which is unavailable cross-process, and `handleOSIntegrationURL` today supports only `terminal`/`open`/`edit` (no focus-session case). Adding a focus-session route + handler case is its own work item; this unit ships app-focus only. If a focus-session route is defined here instead, validate the session id in the handler (the scheme is system-wide — any app can send a `ghostex://` URL).
 
 **Test scenarios:**
-- Happy path: clicking the icon with the app closed launches and focuses `Ghostex.app`.
-- Happy path: clicking with the app already running brings it to front.
-- Edge: clicking a session badge focuses the corresponding session (or no-ops gracefully if the route is not yet implemented).
-- Integration: the `ghostex://` handler receives the expected URL.
+- Happy path: "Open Ghostex" with the app closed launches and focuses `Ghostex.app`.
+- Happy path: "Open Ghostex" with the app already running brings it to front.
+- Integration: the `ghostex://` handler receives the expected app-focus URL.
+- Security (if focus-session is added): a malformed/unknown session id no-ops rather than dispatching to an arbitrary handler branch.
 
-**Verification:** Menu bar clicks reliably bring the main app forward; session-badge click focuses the intended session.
+**Verification:** "Open Ghostex" reliably brings the main app forward.
 
 ---
 
@@ -339,29 +340,34 @@ The per-unit `**Files:**` sections remain authoritative.
 ## Risks & Dependencies
 
 - **R-A — Floating vs menu-bar indicator entanglement (confirmed).** `SetSessionStatusIndicators` (`HostProtocol.swift:845-851`) bundles floating fields (`hideFloatingIndicators`, `size`) and menu-bar fields (`hideMenuBarIndicators`, counts) in one message, and `AppDelegate.swift:2161` is a **shared** click handler for both floating and menu-bar clicks. Deleting `SessionStatusIndicatorController` in U6 will silently break floating indicators unless the protocol message is split and the floating click path is preserved. *Mitigation:* U6 splits the message (floating-only native command) and keeps the floating click path before removing any menu-bar code; verify floating indicators still render/respond first.
-- **R-F — Agent has no source for `size` / hide-menu-bar preferences.** The U1 aggregate carries only counts; the badge `size` and the "hide menu bar indicator" toggle live in sidebar settings today. Without a source, the agent renders at a fixed size and ignores the hide preference. *Mitigation:* U1 either mirrors these prefs into gxserver state/the aggregate, or the agent reads them from a shared settings location (decide — see Open Questions).
+- **R-F — Agent needs the hide-menu-bar preference (not size).** The menu-bar indicator is hard-coded small today (`SessionStatusIndicatorController.swift:159`); `size` applies only to the floating panel, so the agent needs no size source. It does need `hideMenuBarSessionStatusIndicators`. *Mitigation:* U1 carries that one preference on the aggregate.
 - **R-G — Packaging guardrail.** Staging the `.app` in `package-gxserver.mjs` would break `check-package.mjs`'s server-only assertions. *Mitigation:* stage in `build-ghostex-host.sh` (U4).
 - **R-H — Dev/prod flavor collision.** A single hardcoded bundle id (`com.madda.ghostex.bar`), fixed port `58744`, and fixed token path break the deliberate `ghostex-dev` isolation — one agent ends up controlling whichever daemon owns the port. *Mitigation:* give the agent a flavor-aware bundle id / home / port, or explicitly accept single-instance-on-prod for dev (decide — see Open Questions).
 - **R-I — Command-injection / path-integrity on Start.** The agent execs a `gxserver` launcher path; if that path comes from a world-writable runtime-metadata file, a tampered path is executed with the user's privileges by a persistent process. *Mitigation:* resolve the launcher from a fixed bundle-relative location (not daemon-written metadata), write `~/.ghostex/gxserver/auth/token` and any metadata 0600, and validate the path is inside the bundle before exec.
-- **R-B — Agent persistence vs daemon-launched lifecycle.** If the agent were killed on daemon stop, Start would be impossible. *Mitigation:* KTD3/KTD4 — agent persists and registers as a login item; gxserver only bootstraps it.
+- **R-B — Agent persistence vs daemon-launched lifecycle.** If the agent were killed on daemon stop, Start would be impossible. *Mitigation:* KTD3/KTD4 — gxserver bootstraps the agent; the daemon never kills it, so it survives stop. Not a login item; after cold reboot it returns when gxserver next starts.
 - **R-C — Second signed bundle.** Adds notarization/signing surface and could break release if not staged correctly. *Mitigation:* match `ghostex` target signing config; `check-package.mjs` asserts presence.
-- **R-D — Start path correctness.** The agent must locate the bundled `gxserver` launcher; a wrong path silently breaks Start. *Mitigation:* record launcher path in runtime metadata (U3); clear error state on failure.
+- **R-D — Start path correctness.** The agent must locate the bundled `gxserver` launcher; a wrong path silently breaks Start. *Mitigation:* fixed bundle-relative path validated before exec (KTD3); clear error state on failure. (Path is *not* read from runtime metadata.)
+- **R-J — Restart race.** `POST /api/control/stop` returns before shutdown completes (`server.ts:902`); an immediate Start sees the old daemon and exits. *Mitigation:* Restart waits for unreachable between stop and start (KTD3, `GxserverClient.swift:464`).
 - **R-E — Bucket-mapping fidelity.** Server-side aggregation must reproduce the sidebar's current attention/working/available semantics or counts will visibly change. *Mitigation:* U1 tests pin precedence (attention wins) and acknowledged/suppressed handling.
 
 ---
 
-## Open Questions (from doc review, 2026-06-13)
+## Resolved Decisions (maintainer review, 2026-06-13)
 
-Resolve these before or during the named units; several are design forks an implementer cannot invent safely.
+These plan-review forks were resolved in maintainer review and folded into the units/KTDs above:
 
-1. **Reboot persistence mechanism (KTD4, U3).** LaunchAgent plist vs. daemon-driven bootstrap only vs. login-item-eligible bundle relocation? Determines whether R6 extends to cold reboot.
-2. **`NSStatusItem` click/menu model (KTD7, U2, U5).** Confirm "attach menu, 'Open Ghostex' first item, session-focus as menu items." Settles R7 and the badge-click question.
-3. **Dev/prod flavor isolation (R-H, U2).** Flavor-aware bundle id/home/port, or accept single-instance-on-prod for `ghostex-dev`?
-4. **`size` / `hideMenuBarIndicators` source for the agent (R-F, U1).** Mirror into gxserver aggregate, or agent reads a shared settings file?
-5. **`ghostex://` focus-session route (U5, KTD5).** Define the URL contract (e.g. `ghostex://focus/session?id=…`) and the new `handleOSIntegrationURL` case; today only `terminal`/`open`/`edit` exist. Recommend: app-focus in scope now; **per-session focus deferred to follow-up** unless the route is defined here.
-6. **Floating-indicator protocol split (R-A, U6).** Confirm `SetSessionStatusIndicators` splits into a floating-only native command so deletion doesn't break floating indicators.
-7. **Security hardening (R-I, U1/U3/U5).** Token + metadata file mode 0600; launcher resolved from fixed bundle-relative path (not daemon metadata) and validated before exec; new endpoint asserts loopback binding; `ghostex://` input validated (scheme is system-wide — any app can send one); login-item removal/cleanup path on uninstall.
-8. **`SessionStatusIndicatorView` vs `SessionStatusIndicatorController` (coherence).** Confirm the renderer (`SessionStatusIndicatorController.swift:380-453`) and ensure U6's deletion preserves the code U2 moves.
+1. **Reboot persistence → daemon-driven, no login item.** `SMAppService` can't register a gxserver-staged standalone `.app`; the agent is not a login item and returns when gxserver next starts (KTD4, R6, U3).
+2. **Interaction → menu-first.** Attach the `NSMenu`; first item "Open Ghostex"; no bare-icon/badge sub-region click (KTD7, R7, U2, U5).
+3. **Restart → wait-for-stopped between stop and start.** `/api/control/stop` is async (`server.ts:902`); reuse the wait-for-stopped poll (`GxserverClient.swift:464`) (KTD3, R-J, U3).
+4. **Launcher path → fixed bundle-relative, validated; not from runtime metadata** (KTD3, R-D, R-I, U3).
+5. **Badge rendering → preserve `available`-suppression** (show available only all-idle, `:124`) (R3, U1/U2).
+6. **Preference → only `hideMenuBarSessionStatusIndicators`** (menu-bar size is hard-coded small, `:159`; `size` is floating-only) (R-F, U1).
+7. **Floating-indicator protocol split is required** before U6 deletion so floating indicators survive (R-A, U6).
+
+### Still open
+
+- **Dev/prod flavor isolation (R-H, U2).** Should the agent get a flavor-aware bundle id / home / port (so `ghostex-dev` and the installed app each get their own menu bar), or is single-instance-on-prod acceptable for developers running `ghostex-dev`? Needs a decision before U2 fixes the bundle id.
+- **Security details (R-I).** Confirm token/metadata file mode (0600) and the loopback-binding assertion for the new endpoint during U1/U3 implementation.
 
 ---
 
