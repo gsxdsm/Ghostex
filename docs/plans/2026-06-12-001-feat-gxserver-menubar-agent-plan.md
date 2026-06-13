@@ -342,7 +342,7 @@ The per-unit `**Files:**` sections remain authoritative.
 - **R-A — Floating vs menu-bar indicator entanglement (confirmed).** `SetSessionStatusIndicators` (`HostProtocol.swift:845-851`) bundles floating fields (`hideFloatingIndicators`, `size`) and menu-bar fields (`hideMenuBarIndicators`, counts) in one message, and `AppDelegate.swift:2161` is a **shared** click handler for both floating and menu-bar clicks. Deleting `SessionStatusIndicatorController` in U6 will silently break floating indicators unless the protocol message is split and the floating click path is preserved. *Mitigation:* U6 splits the message (floating-only native command) and keeps the floating click path before removing any menu-bar code; verify floating indicators still render/respond first.
 - **R-F — Agent needs the hide-menu-bar preference (not size).** The menu-bar indicator is hard-coded small today (`SessionStatusIndicatorController.swift:159`); `size` applies only to the floating panel, so the agent needs no size source. It does need `hideMenuBarSessionStatusIndicators`. *Mitigation:* U1 carries that one preference on the aggregate.
 - **R-G — Packaging guardrail.** Staging the `.app` in `package-gxserver.mjs` would break `check-package.mjs`'s server-only assertions. *Mitigation:* stage in `build-ghostex-host.sh` (U4).
-- **R-H — Dev/prod flavor collision.** A single hardcoded bundle id (`com.madda.ghostex.bar`), fixed port `58744`, and fixed token path break the deliberate `ghostex-dev` isolation — one agent ends up controlling whichever daemon owns the port. *Mitigation:* give the agent a flavor-aware bundle id / home / port, or explicitly accept single-instance-on-prod for dev (decide — see Open Questions).
+- **R-H — Dev/prod flavor collision (accepted: single-instance-on-prod).** The agent ships with one fixed bundle id (`com.madda.ghostex.bar`) and targets the standard local endpoint/token (`127.0.0.1:58744`, `~/.ghostex/gxserver/auth/token`). Developers running `ghostex-dev` alongside the installed app do **not** get a separate menu bar agent; the single agent controls whichever daemon owns port `58744`. *Decision (maintainer):* this is acceptable — no flavor-aware bundle id / home / port is needed. (Note: dev and prod daemons already can't run simultaneously since port `58744` is a fixed constant.)
 - **R-I — Command-injection / path-integrity on Start.** The agent execs a `gxserver` launcher path; if that path comes from a world-writable runtime-metadata file, a tampered path is executed with the user's privileges by a persistent process. *Mitigation:* resolve the launcher from a fixed bundle-relative location (not daemon-written metadata), write `~/.ghostex/gxserver/auth/token` and any metadata 0600, and validate the path is inside the bundle before exec.
 - **R-B — Agent persistence vs daemon-launched lifecycle.** If the agent were killed on daemon stop, Start would be impossible. *Mitigation:* KTD3/KTD4 — gxserver bootstraps the agent; the daemon never kills it, so it survives stop. Not a login item; after cold reboot it returns when gxserver next starts.
 - **R-C — Second signed bundle.** Adds notarization/signing surface and could break release if not staged correctly. *Mitigation:* match `ghostex` target signing config; `check-package.mjs` asserts presence.
@@ -364,10 +364,11 @@ These plan-review forks were resolved in maintainer review and folded into the u
 6. **Preference → only `hideMenuBarSessionStatusIndicators`** (menu-bar size is hard-coded small, `:159`; `size` is floating-only) (R-F, U1).
 7. **Floating-indicator protocol split is required** before U6 deletion so floating indicators survive (R-A, U6).
 
+8. **Dev/prod flavor isolation → single-instance-on-prod (maintainer).** The agent uses one fixed bundle id and the standard local endpoint/token; `ghostex-dev` does not get its own menu bar agent (R-H, U2).
+
 ### Still open
 
-- **Dev/prod flavor isolation (R-H, U2).** Should the agent get a flavor-aware bundle id / home / port (so `ghostex-dev` and the installed app each get their own menu bar), or is single-instance-on-prod acceptable for developers running `ghostex-dev`? Needs a decision before U2 fixes the bundle id.
-- **Security details (R-I).** Confirm token/metadata file mode (0600) and the loopback-binding assertion for the new endpoint during U1/U3 implementation.
+- **Security details (R-I).** Confirm token/metadata file mode (0600) and the loopback-binding assertion for the new endpoint during U1/U3 implementation. (Implementation detail, not a blocker.)
 
 ---
 
