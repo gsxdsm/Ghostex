@@ -19,7 +19,7 @@ This plan **moves the menu bar presence out of the main app and into a gxserver-
 - Talks to the daemon over the existing local HTTP + WebSocket API on `127.0.0.1:58744`.
 - **Outlives the daemon** so it can start the server when it's stopped; gxserver bootstraps it on first run.
 
-After the move, `SessionStatusIndicatorController` is removed from `Ghostex.app` entirely. Floating / in-window indicators (if any) are explicitly out of scope and must be preserved.
+After the move, `SessionStatusIndicatorController` is removed from `Ghostex.app` entirely. Floating / in-window indicators must keep working — but they are **not** untouched: they currently share a protocol message and click-handler path with the menu-bar item (see R-A), so U6 has to split that shared surface carefully rather than treat the floating indicators as out of scope.
 
 ---
 
@@ -72,7 +72,7 @@ flowchart TD
         URLH["ghostex:// handler\n(AppDelegate.application(open:))"]
     end
 
-    LIFE -. "open -g GxserverBar.app (first run)" .-> bar
+    LIFE -. "open -g GxserverBar.app (idempotent, each start)" .-> bar
     CLIENT -- "GET /api/health, /api/ui/statusIndicators" --> API
     CLIENT -- "WS /api/events (live counts)" --> API
     CLIENT -- "POST /api/control/stop" --> API
@@ -133,11 +133,11 @@ The per-unit `**Files:**` sections remain authoritative.
 
 - **KTD4 — gxserver bootstraps the agent on startup; daemon-driven only, no login item.** On `runGxserverForeground`/background start, gxserver launches `GxserverBar.app` via `open -g` **only when it can resolve the staged bundle** (see U3); absent bundle is a no-op. The agent is **not** registered as a login item: `SMAppService.loginItem` cannot register an arbitrary gxserver-staged standalone `.app` (it requires the bundle inside a parent app's `Contents/Library/LoginItems/`, and login items are user-disableable / lost on Sparkle update). Persistence is therefore **daemon-driven**: the agent survives daemon stop/restart once running, and after a cold reboot returns the next time gxserver starts — matching today's "no menu bar until the app/daemon runs" behavior. Trade-off accepted: no menu bar after reboot until gxserver next launches; this avoids the login-item layout/signing fragility entirely.
 
-- **KTD7 — Menu-first interaction; no badge/sub-region click.** A status item cannot natively expose both a bare click action and an attached `NSMenu` — attaching a menu makes macOS intercept every click to open it, and the current sub-region badge click only works *because* there is no menu (`SessionStatusIndicatorController.swift:550`). Resolution: **attach the menu.** Its first item is **"Open Ghostex"** (app focus); session/status-bucket focus actions are **menu items below it**, not clickable badge regions. R7/U5 are written menu-first accordingly.
-
 - **KTD5 — Cross-process focus via `ghostex://`, from menu items.** Selecting "Open Ghostex" (or a session menu item) opens a `ghostex://` URL handled by `AppDelegate.application(_:open:)` (`AppDelegate.swift:718`), launching/focusing the main app. App-focus is in scope now; a per-session focus route (new `handleOSIntegrationURL` case — today only `terminal`/`open`/`edit` exist) is deferred to follow-up unless its contract is defined during U5.
 
 - **KTD6 — Share rendering by moving, not duplicating.** The badge-image rendering currently in `SessionStatusIndicatorView` (`SessionStatusIndicatorController.swift:380-453`) moves into the agent. Since the main-app indicator is being removed (R8), there is no shared consumer to factor a module for — the code relocates wholesale.
+
+- **KTD7 — Menu-first interaction; no badge/sub-region click.** A status item cannot natively expose both a bare click action and an attached `NSMenu` — attaching a menu makes macOS intercept every click to open it, and the current sub-region badge click only works *because* there is no menu (`SessionStatusIndicatorController.swift:550`). Resolution: **attach the menu.** Its first item is **"Open Ghostex"** (app focus); session/status-bucket focus actions are **menu items below it**, not clickable badge regions. R7/U5 are written menu-first accordingly.
 
 ---
 
@@ -330,7 +330,7 @@ The per-unit `**Files:**` sections remain authoritative.
 - Notarization/signing automation specifics for the second bundle (handled by existing release tooling; only the target + staging are added here).
 
 ### Out of scope / non-goals
-- Floating / in-window session indicators — preserved, not modified.
+- Floating / in-window session indicators — their behavior is preserved (no feature changes), though U6 must restructure the protocol message they share with the menu-bar item (R-A).
 - Linux/standalone server behavior — packaging is gated so it is unaffected.
 - Changing the daemon's port, auth model, or protocol version.
 - Remote / connection-profile gxserver instances — the agent represents and controls **only** the local daemon on `127.0.0.1:58744`; remote instances are not surfaced or controlled by the menu bar.
