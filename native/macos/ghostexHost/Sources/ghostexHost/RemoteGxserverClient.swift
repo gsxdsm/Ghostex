@@ -259,13 +259,20 @@ final class RemoteGxserverClient {
     do {
       try storeTokenInKeychain(token, remoteMachineId: command.remoteMachineId)
     } catch {
+      /*
+       * CDXC:RemoteMachines 2026-06-13: The remote gxserver token is read fresh
+       * over SSH on every connect and is never read back from Keychain, so
+       * persisting it is best-effort. A Keychain ACL conflict — common with
+       * ad-hoc-signed dev builds across rebuilds, where a prior build owns the
+       * item — must not abort an otherwise-healthy connection. Log and continue
+       * to the tunnel instead of returning keychainFailed.
+       */
       let status = OSStatus((error as NSError).code)
       let detail = SecCopyErrorMessageString(status, nil) as String? ?? "unknown error"
-      return statusEvent(
-        command,
-        state: "keychainFailed",
-        ok: false,
-        message: "Could not store the remote gxserver token in Keychain (OSStatus \(status): \(detail))."
+      NSLog(
+        "[ghostex] Remote gxserver token Keychain store failed (OSStatus %d: %@); continuing without persistence.",
+        Int(status),
+        detail
       )
     }
 
@@ -985,7 +992,20 @@ final class RemoteGxserverClient {
     SecItemDelete(query as CFDictionary)
     var addQuery = query
     addQuery[kSecValueData as String] = tokenData
-    let status = SecItemAdd(addQuery as CFDictionary, nil)
+    var status = SecItemAdd(addQuery as CFDictionary, nil)
+    if status == errSecDuplicateItem {
+      /*
+       * CDXC:RemoteMachines 2026-06-13: A token item written by a previous build
+       * stays ACL-bound to that build's code signature. Ad-hoc dev builds get a
+       * new signature each rebuild, so SecItemDelete cannot remove the old item
+       * and SecItemAdd then returns errSecDuplicateItem. Update the existing
+       * item's value in place rather than failing the connection.
+       */
+      status = SecItemUpdate(
+        query as CFDictionary,
+        [kSecValueData as String: tokenData] as CFDictionary
+      )
+    }
     guard status == errSecSuccess else {
       throw NSError(domain: "RemoteGxserverKeychain", code: Int(status))
     }
